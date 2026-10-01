@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # RepoSleuth: Evidence-Based Debugging Agent using MCP
 
 **Python, MCP, LangChain, Git, Ollama/Gemini**
@@ -163,3 +164,6 @@ Example of a typical failure mode: The agent may be misled by the "SECURITY PATC
 6. **No RAG/embeddings**: For large repositories, ripgrep search may be less effective than semantic search. This is by design for this small project.
 7. **Context window limits**: Very large diffs or files get truncated, potentially hiding relevant information.
 8. **No multi-turn debugging**: The agent makes a single investigation pass; it doesn't iteratively refine hypotheses with the user.
+=======
+# mcp-rca
+>>>>>>> d27c01e44c29548d84bea214cb49bdddfde64c56
