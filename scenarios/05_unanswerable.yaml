@@ -1,0 +1,9 @@
+id: unanswerable
+question: Why does the /admin endpoint return 403 for admin users?
+truth:
+  file: null
+  commit: null
+  keywords:
+  - insufficient evidence
+  - not found
+  - no evidence

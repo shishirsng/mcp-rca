@@ -1,0 +1,7 @@
+fixture_repo/
+__pycache__/
+*.pyc
+.venv/
+traces/*.jsonl
+results/*.md
+.env

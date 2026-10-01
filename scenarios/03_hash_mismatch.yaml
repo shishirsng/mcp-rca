@@ -1,0 +1,10 @@
+id: hash-mismatch
+question: Some users cannot log in even with the correct password. What changed?
+truth:
+  file: app/auth.py
+  commit: f7df231cda1d89ca7a843faaf4be63830df06a91
+  keywords:
+  - hash
+  - md5
+  - sha256
+  - verify_password

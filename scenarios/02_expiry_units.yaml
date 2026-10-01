@@ -1,0 +1,11 @@
+id: expiry-units
+question: Login tokens expire almost immediately, users complain they get logged out
+  within seconds. What is wrong?
+truth:
+  file: app/auth.py
+  commit: c331e9726801833c57f81bea00e962f7efefaac9
+  keywords:
+  - expiry
+  - minutes
+  - seconds
+  - timedelta

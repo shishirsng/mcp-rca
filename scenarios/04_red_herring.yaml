@@ -1,0 +1,9 @@
+id: red-herring
+question: Authentication is broken after recent changes. What commit caused it?
+truth:
+  file: app/config.py
+  commit: 3fb5d25c8f17b9f2ddc3e86e741608719abd15a6
+  keywords:
+  - JWT_SECRET
+  - renamed
+  - SECRET_KEY
