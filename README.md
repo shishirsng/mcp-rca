@@ -1,4 +1,4 @@
-<<<<<<< HEAD
+
 # RepoSleuth: Evidence-Based Debugging Agent using MCP
 
 **Python, MCP, LangChain, Git, Ollama/Gemini**
@@ -38,27 +38,27 @@ Final Answer:
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│                        CLI / Eval Harness                    │
+│                        CLI / Eval Harness                   │
 │  (agent.py / run_eval.py)                                   │
 ├─────────────────────────────────────────────────────────────┤
-│                     LangChain ReAct Agent                    │
-│  ┌─────────────┐  ┌──────────────┐  ┌────────────────────┐ │
-│  │ System Prompt│  │ LLM (Gemini/ │  │  JSONL Tracer     │ │
-│  │ (prompts.py) │  │  Ollama)     │  │  (traces/)        │ │
-│  └─────────────┘  └──────┬───────┘  └────────────────────┘ │
-│                          │ tool calls                        │
+│                     LangChain ReAct Agent                   │
+│  ┌─────────────┐  ┌──────────────┐  ┌────────────────────┐  │
+│  │ System Prompt│  │ LLM (Gemini/ │  │  JSONL Tracer     │  │
+│  │ (prompts.py) │  │  Ollama)     │  │  (traces/)        │  │
+│  └─────────────┘  └──────┬───────┘  └────────────────────┘  │
+│                          │ tool calls                       │
 ├──────────────────────────┼──────────────────────────────────┤
-│              MCP Client  │  (langchain-mcp-adapters)         │
+│              MCP Client  │  (langchain-mcp-adapters)        │
 │              ────────────┼─── JSON-RPC / stdio ──────────── │
 ├──────────────────────────┼──────────────────────────────────┤
-│              MCP Server  │  (server.py / FastMCP)            │
-│  ┌───────────┐ ┌─────────┴──┐ ┌──────────┐ ┌────────────┐ │
-│  │ list_files│ │ search_code│ │ read_file │ │ git_log/   │ │
-│  │           │ │ (ripgrep)  │ │ (path jail│ │ git_show   │ │
-│  └───────────┘ └────────────┘ │  + trunc) │ │ (read-only)│ │
-│                               └──────────┘ └────────────┘  │
+│              MCP Server  │  (server.py / FastMCP)           │
+│  ┌───────────┐ ┌─────────┴──┐ ┌──────────┐ ┌────────────┐   │
+│  │ list_files│ │ search_code│ │ read_file │ │ git_log/   │  │
+│  │           │ │ (ripgrep)  │ │ (path jail│ │ git_show   │  │
+│  └───────────┘ └────────────┘ │  + trunc) │ │ (read-only)│  │
+│                               └──────────┘ └────────────┘   │ 
 ├─────────────────────────────────────────────────────────────┤
-│                    fixture_repo/ (git)                       │
+│                    fixture_repo/ (git)                      │
 │  app/config.py  app/auth.py  app/main.py  notes/            │
 └─────────────────────────────────────────────────────────────┘
 ```
@@ -166,4 +166,3 @@ Example of a typical failure mode: The agent may be misled by the "SECURITY PATC
 8. **No multi-turn debugging**: The agent makes a single investigation pass; it doesn't iteratively refine hypotheses with the user.
 =======
 # mcp-rca
->>>>>>> d27c01e44c29548d84bea214cb49bdddfde64c56
