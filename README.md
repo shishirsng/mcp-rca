@@ -41,27 +41,27 @@ Final Answer:
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│                        CLI / Eval Harness                    │
+│                        CLI / Eval Harness                   │
 │  (agent.py / run_eval.py)                                   │
 ├─────────────────────────────────────────────────────────────┤
-│                     LangChain ReAct Agent                    │
-│  ┌─────────────┐  ┌──────────────────┐  ┌───────────────┐  │
+│                     LangChain ReAct Agent                   │
+│  ┌─────────────┐  ┌──────────────────┐  ┌───────────────┐   │
 │  │ System Prompt│  │ LLM (OpenRouter) │  │ JSONL Tracer  │  │
 │  │ (prompts.py) │  │ (free tier)      │  │ (traces/)     │  │
-│  └─────────────┘  └────────┬─────────┘  └───────────────┘  │
-│                            │ tool calls                      │
+│  └─────────────┘  └────────┬─────────┘  └───────────────┘   │
+│                            │ tool calls                     │
 ├────────────────────────────┼────────────────────────────────┤
-│              MCP Client    │  (langchain-mcp-adapters)       │
+│              MCP Client    │  (langchain-mcp-adapters)      │
 │              ──────────────┼─── JSON-RPC / stdio ────────── │
 ├────────────────────────────┼────────────────────────────────┤
-│              MCP Server    │  (server.py / FastMCP)          │
-│  ┌───────────┐ ┌───────────┴┐ ┌──────────┐ ┌────────────┐  │
+│              MCP Server    │  (server.py / FastMCP)         │
+│  ┌───────────┐ ┌───────────┴┐ ┌──────────┐ ┌────────────┐   │
 │  │ list_files│ │ search_code│ │ read_file │ │ git_log/   │  │
 │  │           │ │ (git grep) │ │ (path jail│ │ git_show   │  │
 │  └───────────┘ └────────────┘ │  + trunc) │ │ (read-only)│  │
 │                               └──────────┘ └────────────┘   │
 ├─────────────────────────────────────────────────────────────┤
-│                    fixture_repo/ (git)                       │
+│                    fixture_repo/ (git)                      │
 │  app/config.py  app/auth.py  app/main.py  notes/            │
 └─────────────────────────────────────────────────────────────┘
 ```
