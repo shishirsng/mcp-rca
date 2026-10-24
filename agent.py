@@ -3,10 +3,11 @@
 
 Uses LangChain with MultiServerMCPClient to launch the MCP server and
 investigate repository bugs via tool-calling. Writes structured JSONL traces.
+Powered by OpenRouter (free tier).
 
 Usage:
     python agent.py "Why are users getting 401 after login?"
-    python agent.py --model gemini "Why are users getting 401 after login?"
+    python agent.py --model openrouter/free "Why are users getting 401 after login?"
 """
 
 import argparse
@@ -20,6 +21,11 @@ import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
+
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_mcp_adapters.client import MultiServerMCPClient
@@ -35,7 +41,7 @@ TRACES_DIR = Path(__file__).parent / "traces"
 TRACES_DIR.mkdir(exist_ok=True)
 
 RECURSION_LIMIT = 25
-TOTAL_TIMEOUT_SECONDS = 120
+TOTAL_TIMEOUT_SECONDS = 180
 SERVER_SCRIPT = str(Path(__file__).parent / "server.py")
 
 
@@ -44,28 +50,43 @@ def get_python_executable() -> str:
     return sys.executable
 
 
-def get_llm(model_name: str = "ollama"):
-    """Create the LLM instance based on model name.
+def get_llm(model_name: str = "openrouter"):
+    """Create the LLM instance using OpenRouter.
 
-    Supports:
-        - 'ollama' or model name like 'qwen2.5': uses Ollama local model
-        - 'gemini': uses Google Gemini via API key in GOOGLE_API_KEY env var
+    Uses OpenRouter API via OPENROUTER_API_KEY environment variable (or .env file).
+    Default model is 'openrouter/auto' (or user-selected model via OPENROUTER_MODEL).
     """
-    if model_name in ("gemini", "gemini-2.0-flash"):
-        from langchain_google_genai import ChatGoogleGenerativeAI
-        api_key = os.environ.get("GOOGLE_API_KEY", "")
-        if not api_key:
-            raise ValueError("Set GOOGLE_API_KEY environment variable for Gemini.")
-        return ChatGoogleGenerativeAI(
-            model="gemini-2.0-flash",
-            google_api_key=api_key,
-            temperature=0,
+    from langchain_openai import ChatOpenAI
+
+    api_key = os.environ.get("OPENROUTER_API_KEY", "").strip()
+    if not api_key:
+        raise ValueError(
+            "Missing OPENROUTER_API_KEY in .env file or environment.\n"
+            "Add your key to the .env file:\n"
+            "  OPENROUTER_API_KEY=sk-or-v1-...\n"
+            "Get an API key at https://openrouter.ai"
         )
+
+    # Determine model ID
+    if model_name in ("openrouter", "default", "auto", "model:auto"):
+        or_model = os.environ.get("OPENROUTER_MODEL", "openrouter/auto").strip()
     else:
-        from langchain_ollama import ChatOllama
-        # Default to qwen2.5 if just 'ollama' specified
-        ollama_model = model_name if model_name != "ollama" else "qwen2.5"
-        return ChatOllama(model=ollama_model, temperature=0)
+        or_model = model_name.strip()
+
+    # Normalize "auto" or "model:auto" to "openrouter/auto"
+    if or_model in ("auto", "model:auto"):
+        or_model = "openrouter/auto"
+
+    return ChatOpenAI(
+        model=or_model,
+        openai_api_key=api_key,
+        openai_api_base="https://openrouter.ai/api/v1",
+        temperature=0,
+        default_headers={
+            "HTTP-Referer": "https://github.com/reposleuth",
+            "X-Title": "RepoSleuth",
+        },
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -153,7 +174,7 @@ def validate_commit_in_trace(answer: dict, tracer: Tracer) -> bool:
 
 async def run_agent(
     question: str,
-    model_name: str = "ollama",
+    model_name: str = "openrouter",
     scenario_id: str = "interactive",
     run_id: str | None = None,
 ) -> dict:
@@ -167,10 +188,6 @@ async def run_agent(
     tracer = Tracer(run_id, scenario_id)
     tracer.record(event="start", question=question, model=model_name)
 
-    llm = get_llm(model_name)
-    python_exe = get_python_executable()
-    repo_root = str((Path(__file__).parent / "fixture_repo").resolve())
-
     result_data = {
         "answer": None,
         "tool_calls": 0,
@@ -183,7 +200,11 @@ async def run_agent(
     start_time = time.time()
 
     try:
-        async with MultiServerMCPClient(
+        llm = get_llm(model_name)
+        python_exe = get_python_executable()
+        repo_root = str((Path(__file__).parent / "fixture_repo").resolve())
+
+        client = MultiServerMCPClient(
             {
                 "reposleuth": {
                     "command": python_exe,
@@ -192,94 +213,94 @@ async def run_agent(
                     "env": {"REPO_ROOT": repo_root},
                 }
             }
-        ) as client:
-            tools = client.get_tools()
-            agent = create_react_agent(llm, tools)
+        )
+        tools = await client.get_tools()
+        agent = create_react_agent(llm, tools)
 
-            messages = [
-                SystemMessage(content=SYSTEM_PROMPT),
-                HumanMessage(content=question),
-            ]
+        messages = [
+            SystemMessage(content=SYSTEM_PROMPT),
+            HumanMessage(content=question),
+        ]
 
-            # Track tool calls for deduplication counting
-            seen_calls: list[tuple[str, str]] = []
+        # Track tool calls for deduplication counting
+        seen_calls: list[tuple[str, str]] = []
 
-            response = await asyncio.wait_for(
-                agent.ainvoke(
-                    {"messages": messages},
-                    config={"recursion_limit": RECURSION_LIMIT},
-                ),
-                timeout=TOTAL_TIMEOUT_SECONDS,
-            )
+        response = await asyncio.wait_for(
+            agent.ainvoke(
+                {"messages": messages},
+                config={"recursion_limit": RECURSION_LIMIT},
+            ),
+            timeout=TOTAL_TIMEOUT_SECONDS,
+        )
 
-            # Process response messages to count tool calls and extract answer
-            for msg in response.get("messages", []):
-                if isinstance(msg, AIMessage) and msg.tool_calls:
-                    for tc in msg.tool_calls:
-                        call_key = (tc["name"], json.dumps(tc.get("args", {}), sort_keys=True))
-                        if call_key in seen_calls:
-                            result_data["duplicate_calls"] += 1
-                        seen_calls.append(call_key)
-                        result_data["tool_calls"] += 1
+        # Process response messages to count tool calls and extract answer
+        for msg in response.get("messages", []):
+            if isinstance(msg, AIMessage) and msg.tool_calls:
+                for tc in msg.tool_calls:
+                    call_key = (tc["name"], json.dumps(tc.get("args", {}), sort_keys=True))
+                    if call_key in seen_calls:
+                        result_data["duplicate_calls"] += 1
+                    seen_calls.append(call_key)
+                    result_data["tool_calls"] += 1
 
-                        tracer.record(
-                            event="tool_call",
-                            tool=tc["name"],
-                            args=tc.get("args", {}),
+                    tracer.record(
+                        event="tool_call",
+                        tool=tc["name"],
+                        args=tc.get("args", {}),
+                    )
+
+            if isinstance(msg, ToolMessage):
+                content_str = msg.content if isinstance(msg.content, str) else str(msg.content)
+                tracer.record(
+                    event="tool_result",
+                    tool=msg.name,
+                    result=content_str[:2000],  # limit trace size
+                    result_size=len(content_str),
+                )
+
+        # Extract final answer from the last AI message
+        final_text = ""
+        for msg in reversed(response.get("messages", [])):
+            if isinstance(msg, AIMessage) and not msg.tool_calls:
+                final_text = msg.content
+                break
+
+        answer = parse_json_answer(final_text)
+
+        if answer:
+            # Validate cited commit
+            if not validate_commit_in_trace(answer, tracer):
+                tracer.record(
+                    event="validation_warning",
+                    message="Cited commit not found in tool output. Requesting correction.",
+                )
+                # Send correction message
+                correction_messages = response["messages"] + [
+                    HumanMessage(
+                        content=(
+                            "The commit hash you cited was not found in any tool output. "
+                            "Please re-check by using git_log and provide a correct commit hash."
                         )
+                    ),
+                ]
+                correction_response = await asyncio.wait_for(
+                    agent.ainvoke(
+                        {"messages": correction_messages},
+                        config={"recursion_limit": 10},
+                    ),
+                    timeout=60,
+                )
+                for msg in reversed(correction_response.get("messages", [])):
+                    if isinstance(msg, AIMessage) and not msg.tool_calls:
+                        corrected = parse_json_answer(msg.content)
+                        if corrected:
+                            answer = corrected
+                        break
 
-                if isinstance(msg, ToolMessage):
-                    content_str = msg.content if isinstance(msg.content, str) else str(msg.content)
-                    tracer.record(
-                        event="tool_result",
-                        tool=msg.name,
-                        result=content_str[:2000],  # limit trace size
-                        result_size=len(content_str),
-                    )
-
-            # Extract final answer from the last AI message
-            final_text = ""
-            for msg in reversed(response.get("messages", [])):
-                if isinstance(msg, AIMessage) and not msg.tool_calls:
-                    final_text = msg.content
-                    break
-
-            answer = parse_json_answer(final_text)
-
-            if answer:
-                # Validate cited commit
-                if not validate_commit_in_trace(answer, tracer):
-                    tracer.record(
-                        event="validation_warning",
-                        message="Cited commit not found in tool output. Requesting correction.",
-                    )
-                    # Send correction message
-                    correction_messages = response["messages"] + [
-                        HumanMessage(
-                            content=(
-                                "The commit hash you cited was not found in any tool output. "
-                                "Please re-check by using git_log and provide a correct commit hash."
-                            )
-                        ),
-                    ]
-                    correction_response = await asyncio.wait_for(
-                        agent.ainvoke(
-                            {"messages": correction_messages},
-                            config={"recursion_limit": 10},
-                        ),
-                        timeout=60,
-                    )
-                    for msg in reversed(correction_response.get("messages", [])):
-                        if isinstance(msg, AIMessage) and not msg.tool_calls:
-                            corrected = parse_json_answer(msg.content)
-                            if corrected:
-                                answer = corrected
-                            break
-
-                result_data["answer"] = answer
-            else:
-                result_data["answer"] = {"raw_text": final_text}
-                result_data["error"] = "invalid_json"
+            result_data["answer"] = answer
+        else:
+            result_data["answer"] = {"raw_text": final_text}
+            result_data["error"] = "invalid_json"
 
     except asyncio.TimeoutError:
         result_data["error"] = "timeout"
@@ -301,12 +322,12 @@ async def run_agent(
 # ---------------------------------------------------------------------------
 
 
-async def run_baseline(question: str, model_name: str = "ollama") -> dict:
+async def run_baseline(question: str, model_name: str = "openrouter") -> dict:
     """Run the same model without tools (baseline for comparison)."""
-    llm = get_llm(model_name)
     start_time = time.time()
 
     try:
+        llm = get_llm(model_name)
         response = await asyncio.wait_for(
             llm.ainvoke([
                 SystemMessage(content=SYSTEM_PROMPT),
@@ -332,7 +353,7 @@ async def run_baseline(question: str, model_name: str = "ollama") -> dict:
 # ---------------------------------------------------------------------------
 
 
-async def raw_agent_loop(question: str, model_name: str = "ollama") -> None:
+async def raw_agent_loop(question: str, model_name: str = "openrouter") -> None:
     """Demonstrate the raw agent loop without LangGraph.
 
     This shows the underlying process:
@@ -346,11 +367,15 @@ async def raw_agent_loop(question: str, model_name: str = "ollama") -> None:
     print("RAW AGENT LOOP (for understanding the mechanics)")
     print("=" * 60)
 
-    llm = get_llm(model_name)
+    try:
+        llm = get_llm(model_name)
+    except ValueError as e:
+        print(f"\n[Error] {e}", file=sys.stderr)
+        return
     python_exe = get_python_executable()
     repo_root = str((Path(__file__).parent / "fixture_repo").resolve())
 
-    async with MultiServerMCPClient(
+    client = MultiServerMCPClient(
         {
             "reposleuth": {
                 "command": python_exe,
@@ -359,60 +384,60 @@ async def raw_agent_loop(question: str, model_name: str = "ollama") -> None:
                 "env": {"REPO_ROOT": repo_root},
             }
         }
-    ) as client:
-        tools = client.get_tools()
+    )
+    tools = await client.get_tools()
 
-        # Bind tools to the model
-        model_with_tools = llm.bind_tools(tools)
+    # Bind tools to the model
+    model_with_tools = llm.bind_tools(tools)
 
-        # Build initial messages
-        messages = [
-            SystemMessage(content=SYSTEM_PROMPT),
-            HumanMessage(content=question),
-        ]
+    # Build initial messages
+    messages = [
+        SystemMessage(content=SYSTEM_PROMPT),
+        HumanMessage(content=question),
+    ]
 
-        # Create a tool name -> tool function mapping
-        tool_map = {tool.name: tool for tool in tools}
+    # Create a tool name -> tool function mapping
+    tool_map = {tool.name: tool for tool in tools}
 
-        step = 0
-        max_steps = RECURSION_LIMIT
+    step = 0
+    max_steps = min(RECURSION_LIMIT, 5)
 
-        while step < max_steps:
-            step += 1
-            print(f"\n--- Step {step} ---")
+    while step < max_steps:
+        step += 1
+        print(f"\n--- Step {step} ---", flush=True)
 
-            # 1. Call model
-            response = await model_with_tools.ainvoke(messages)
-            messages.append(response)
+        # 1. Call model
+        response = await model_with_tools.ainvoke(messages)
+        messages.append(response)
 
-            # 2. Check if model wants to call tools
-            if not response.tool_calls:
-                print(f"[FINAL ANSWER]\n{response.content}")
-                break
+        # 2. Check if model wants to call tools
+        if not response.tool_calls:
+            print(f"[FINAL ANSWER]\n{response.content}", flush=True)
+            break
 
-            # 3. Execute each requested tool
-            for tc in response.tool_calls:
-                tool_name = tc["name"]
-                tool_args = tc["args"]
-                print(f"[TOOL CALL] {tool_name}({json.dumps(tool_args)})")
+        # 3. Execute each requested tool
+        for tc in response.tool_calls:
+            tool_name = tc["name"]
+            tool_args = tc["args"]
+            print(f"[TOOL CALL] {tool_name}({json.dumps(tool_args)})", flush=True)
 
-                if tool_name not in tool_map:
-                    result = f"Error: unknown tool '{tool_name}'"
-                else:
-                    # Execute the tool
-                    result = await tool_map[tool_name].ainvoke(tool_args)
+            if tool_name not in tool_map:
+                result = f"Error: unknown tool '{tool_name}'"
+            else:
+                # Execute the tool
+                result = await tool_map[tool_name].ainvoke(tool_args)
 
-                print(f"[RESULT] {str(result)[:200]}...")
+            print(f"[RESULT] {str(result)[:200]}...", flush=True)
 
-                # 4. Append the result as a ToolMessage
-                messages.append(
-                    ToolMessage(content=str(result), tool_call_id=tc["id"])
-                )
+            # 4. Append the result as a ToolMessage
+            messages.append(
+                ToolMessage(content=str(result), tool_call_id=tc["id"])
+            )
 
-            # 5. Loop continues - model will process results and decide next step
+        # 5. Loop continues - model will process results and decide next step
 
-        if step >= max_steps:
-            print(f"\n[STOPPED] Reached recursion limit ({max_steps})")
+    if step >= max_steps:
+        print(f"\n[STOPPED] Reached recursion limit ({max_steps})", flush=True)
 
 
 # ---------------------------------------------------------------------------
@@ -422,24 +447,28 @@ async def raw_agent_loop(question: str, model_name: str = "ollama") -> None:
 
 def main():
     parser = argparse.ArgumentParser(
-        description="RepoSleuth: Evidence-Based Debugging Agent"
+        description="RepoSleuth: Evidence-Based Debugging Agent using MCP"
     )
     parser.add_argument("question", nargs="?", default="Why are users getting 401 after login?",
                        help="The debugging question to investigate")
-    parser.add_argument("--model", default="gemini",
-                       help="Model to use: ollama, qwen2.5, gemini (default: gemini)")
+    parser.add_argument("--model", default="openrouter",
+                       help="Model: openrouter (default, uses free tier), or model name (e.g. meta-llama/llama-3.3-70b-instruct:free)")
     parser.add_argument("--raw", action="store_true",
                        help="Run the raw agent loop (for learning)")
     args = parser.parse_args()
 
-    if args.raw:
-        asyncio.run(raw_agent_loop(args.question, args.model))
-    else:
-        result = asyncio.run(run_agent(args.question, args.model))
-        print("\n" + "=" * 60)
-        print("RESULT")
-        print("=" * 60)
-        print(json.dumps(result, indent=2, default=str))
+    try:
+        if args.raw:
+            asyncio.run(raw_agent_loop(args.question, args.model))
+        else:
+            result = asyncio.run(run_agent(args.question, args.model))
+            print("\n" + "=" * 60)
+            print("RESULT")
+            print("=" * 60)
+            print(json.dumps(result, indent=2, default=str))
+    except ValueError as e:
+        print(f"\n[Configuration Error] {e}", file=sys.stderr)
+        sys.exit(1)
 
 
 if __name__ == "__main__":
