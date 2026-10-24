@@ -3,10 +3,11 @@
 
 Builds the fixture repository, runs the agent on each scenario 3 times,
 runs a no-tools baseline, scores correctness, and saves results.
+Uses OpenRouter (free tier).
 
 Usage:
     python run_eval.py
-    python run_eval.py --model gemini
+    python run_eval.py --model openrouter
     python run_eval.py --runs 1  # quick test with 1 run per scenario
 """
 
@@ -18,7 +19,11 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
+from dotenv import load_dotenv
 import yaml
+
+# Load .env file
+load_dotenv()
 
 from agent import run_agent, run_baseline
 
@@ -329,8 +334,8 @@ async def run_evaluation(model_name: str, num_runs: int = 3) -> None:
 
 def main():
     parser = argparse.ArgumentParser(description="RepoSleuth Evaluation Harness")
-    parser.add_argument("--model", default="gemini",
-                       help="Model: ollama, qwen2.5, gemini (default: gemini)")
+    parser.add_argument("--model", default="openrouter",
+                       help="OpenRouter model: openrouter (default, uses free tier), or model ID (e.g. meta-llama/llama-3.3-70b-instruct:free)")
     parser.add_argument("--runs", type=int, default=3,
                        help="Number of runs per scenario (default: 3)")
     args = parser.parse_args()

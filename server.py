@@ -68,12 +68,15 @@ def truncate_output(text: str, max_lines: int = MAX_LINES, max_bytes: int = MAX_
 
 def run_subprocess(args: list[str], cwd: Path | None = None, timeout: int = 15) -> str:
     """Run a subprocess safely. Never uses shell=True."""
+    env = {**os.environ, "GIT_PAGER": "cat", "PAGER": "cat"}
     result = subprocess.run(
         args,
         cwd=cwd or REPO_ROOT,
         capture_output=True,
         text=True,
         timeout=timeout,
+        stdin=subprocess.DEVNULL,
+        env=env,
     )
     if result.returncode != 0:
         return f"Error (exit {result.returncode}): {result.stderr.strip()}"
