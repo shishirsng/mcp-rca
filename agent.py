@@ -3,11 +3,11 @@
 
 Uses LangChain with MultiServerMCPClient to launch the MCP server and
 investigate repository bugs via tool-calling. Writes structured JSONL traces.
-Powered by OpenRouter (free tier).
+Powered by OpenRouter.
 
 Usage:
     python agent.py "Why are users getting 401 after login?"
-    python agent.py --model openrouter/free "Why are users getting 401 after login?"
+    python agent.py --model openrouter/auto "Why are users getting 401 after login?"
 """
 
 import argparse
@@ -22,6 +22,13 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
+# Ensure UTF-8 output encoding on Windows consoles
+if sys.platform == "win32":
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    if hasattr(sys.stderr, "reconfigure"):
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
 from dotenv import load_dotenv
 
 # Load environment variables from .env file
@@ -29,7 +36,7 @@ load_dotenv()
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_mcp_adapters.client import MultiServerMCPClient
-from langgraph.prebuilt import create_react_agent
+from langchain.agents import create_agent
 
 from prompts import SYSTEM_PROMPT
 
@@ -40,8 +47,8 @@ from prompts import SYSTEM_PROMPT
 TRACES_DIR = Path(__file__).parent / "traces"
 TRACES_DIR.mkdir(exist_ok=True)
 
-RECURSION_LIMIT = 25
-TOTAL_TIMEOUT_SECONDS = 180
+RECURSION_LIMIT = 30
+TOTAL_TIMEOUT_SECONDS = 300
 SERVER_SCRIPT = str(Path(__file__).parent / "server.py")
 
 
@@ -82,6 +89,7 @@ def get_llm(model_name: str = "openrouter"):
         openai_api_key=api_key,
         openai_api_base="https://openrouter.ai/api/v1",
         temperature=0,
+        streaming=True,
         default_headers={
             "HTTP-Referer": "https://github.com/reposleuth",
             "X-Title": "RepoSleuth",
@@ -127,26 +135,30 @@ class Tracer:
 
 def parse_json_answer(text: str) -> dict | None:
     """Extract JSON from the agent's final response."""
-    # Try to find JSON block in the text
-    # Look for ```json ... ``` blocks first
-    json_match = re.search(r"```json\s*\n?(.*?)\n?```", text, re.DOTALL)
+    if not text:
+        return None
+
+    # Try to find ```json ... ``` blocks first
+    json_match = re.search(r"```(?:json)?\s*\n?(.*?)\n?```", text, re.DOTALL)
     if json_match:
         try:
-            return json.loads(json_match.group(1))
-        except json.JSONDecodeError:
+            return json.loads(json_match.group(1).strip())
+        except (json.JSONDecodeError, ValueError):
             pass
 
-    # Try to find a raw JSON object
-    json_match = re.search(r"\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}", text, re.DOTALL)
-    if json_match:
+    # Try to find outer-most JSON object { ... }
+    start = text.find("{")
+    end = text.rfind("}")
+    if start != -1 and end != -1 and end > start:
+        candidate = text[start : end + 1]
         try:
-            return json.loads(json_match.group(0))
-        except json.JSONDecodeError:
+            return json.loads(candidate)
+        except (json.JSONDecodeError, ValueError):
             pass
 
-    # Try the whole text
+    # Try the whole text directly
     try:
-        return json.loads(text)
+        return json.loads(text.strip())
     except (json.JSONDecodeError, ValueError):
         pass
 
@@ -215,55 +227,60 @@ async def run_agent(
             }
         )
         tools = await client.get_tools()
-        agent = create_react_agent(llm, tools)
+        agent = create_agent(llm, tools, system_prompt=SYSTEM_PROMPT)
 
         messages = [
-            SystemMessage(content=SYSTEM_PROMPT),
             HumanMessage(content=question),
         ]
 
-        # Track tool calls for deduplication counting
         seen_calls: list[tuple[str, str]] = []
-
-        response = await asyncio.wait_for(
-            agent.ainvoke(
-                {"messages": messages},
-                config={"recursion_limit": RECURSION_LIMIT},
-            ),
-            timeout=TOTAL_TIMEOUT_SECONDS,
-        )
-
-        # Process response messages to count tool calls and extract answer
-        for msg in response.get("messages", []):
-            if isinstance(msg, AIMessage) and msg.tool_calls:
-                for tc in msg.tool_calls:
-                    call_key = (tc["name"], json.dumps(tc.get("args", {}), sort_keys=True))
-                    if call_key in seen_calls:
-                        result_data["duplicate_calls"] += 1
-                    seen_calls.append(call_key)
-                    result_data["tool_calls"] += 1
-
-                    tracer.record(
-                        event="tool_call",
-                        tool=tc["name"],
-                        args=tc.get("args", {}),
-                    )
-
-            if isinstance(msg, ToolMessage):
-                content_str = msg.content if isinstance(msg.content, str) else str(msg.content)
-                tracer.record(
-                    event="tool_result",
-                    tool=msg.name,
-                    result=content_str[:2000],  # limit trace size
-                    result_size=len(content_str),
-                )
-
-        # Extract final answer from the last AI message
+        all_messages: list = []
         final_text = ""
-        for msg in reversed(response.get("messages", [])):
-            if isinstance(msg, AIMessage) and not msg.tool_calls:
-                final_text = msg.content
-                break
+
+        async def _stream_execution():
+            nonlocal final_text
+            async for event in agent.astream(
+                {"messages": messages},
+                stream_mode="updates",
+                config={"recursion_limit": RECURSION_LIMIT},
+            ):
+                for node_name, node_output in event.items():
+                    node_msgs = node_output.get("messages", [])
+                    for msg in node_msgs:
+                        all_messages.append(msg)
+                        if isinstance(msg, AIMessage) and msg.tool_calls:
+                            for tc in msg.tool_calls:
+                                call_key = (tc["name"], json.dumps(tc.get("args", {}), sort_keys=True))
+                                if call_key in seen_calls:
+                                    result_data["duplicate_calls"] += 1
+                                seen_calls.append(call_key)
+                                result_data["tool_calls"] += 1
+
+                                tracer.record(
+                                    event="tool_call",
+                                    tool=tc["name"],
+                                    args=tc.get("args", {}),
+                                )
+                        elif isinstance(msg, ToolMessage):
+                            content_str = msg.content if isinstance(msg.content, str) else str(msg.content)
+                            tool_name = getattr(msg, "name", "tool") or "tool"
+                            tracer.record(
+                                event="tool_result",
+                                tool=tool_name,
+                                result=content_str[:2000],  # limit trace size
+                                result_size=len(content_str),
+                            )
+                        elif isinstance(msg, AIMessage) and not msg.tool_calls and msg.content:
+                            final_text = msg.content
+
+        try:
+            await asyncio.wait_for(_stream_execution(), timeout=TOTAL_TIMEOUT_SECONDS)
+        except asyncio.TimeoutError:
+            result_data["error"] = "timeout"
+            tracer.record(event="error", error="timeout")
+        except Exception as e:
+            result_data["error"] = f"crash: {e}"
+            tracer.record(event="error", error=str(e))
 
         answer = parse_json_answer(final_text)
 
@@ -272,39 +289,15 @@ async def run_agent(
             if not validate_commit_in_trace(answer, tracer):
                 tracer.record(
                     event="validation_warning",
-                    message="Cited commit not found in tool output. Requesting correction.",
+                    message="Cited commit not found in tool output.",
                 )
-                # Send correction message
-                correction_messages = response["messages"] + [
-                    HumanMessage(
-                        content=(
-                            "The commit hash you cited was not found in any tool output. "
-                            "Please re-check by using git_log and provide a correct commit hash."
-                        )
-                    ),
-                ]
-                correction_response = await asyncio.wait_for(
-                    agent.ainvoke(
-                        {"messages": correction_messages},
-                        config={"recursion_limit": 10},
-                    ),
-                    timeout=60,
-                )
-                for msg in reversed(correction_response.get("messages", [])):
-                    if isinstance(msg, AIMessage) and not msg.tool_calls:
-                        corrected = parse_json_answer(msg.content)
-                        if corrected:
-                            answer = corrected
-                        break
-
             result_data["answer"] = answer
-        else:
+            if result_data["error"] and "Recursion" in str(result_data["error"]):
+                result_data["error"] = None
+        elif not result_data.get("error"):
             result_data["answer"] = {"raw_text": final_text}
             result_data["error"] = "invalid_json"
 
-    except asyncio.TimeoutError:
-        result_data["error"] = "timeout"
-        tracer.record(event="error", error="timeout")
     except Exception as e:
         result_data["error"] = f"crash: {e}"
         tracer.record(event="error", error=str(e))
@@ -466,9 +459,10 @@ def main():
             print("RESULT")
             print("=" * 60)
             print(json.dumps(result, indent=2, default=str))
-    except ValueError as e:
-        print(f"\n[Configuration Error] {e}", file=sys.stderr)
-        sys.exit(1)
+    except Exception as e:
+        if not isinstance(e, (KeyboardInterrupt, SystemExit)):
+            print(f"\n[Error] {e}", file=sys.stderr)
+            sys.exit(1)
 
 
 if __name__ == "__main__":
